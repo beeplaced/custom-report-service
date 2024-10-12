@@ -1,0 +1,19 @@
+{
+    "name": "custom-report-service",
+    "version": "1.0.0",
+    "description": "custom-report-service",
+    "main": "index.js",
+    "scripts": {
+        "start": "node index.js"
+    },
+    "dependencies": {
+        "jszip": "^3.10.1",
+        "sharp": "^0.33.5",
+        "undici-types": "^6.19.8",
+        "xml-js": "^1.6.11"
+    },
+    "devDependencies": {
+        "@types/node": "^22.7.5",
+        "typescript": "^5.6.3"
+    }
+}
