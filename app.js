@@ -1,15 +1,31 @@
-const CustomError = require('./types/customError');
-//const { throwError } = require('../types/errorhandling');
+const { throwError } = require('../types/errorhandling');
+const { buildDrawingObject } = require('./drawingObject');
 const fs = require('fs');
 const JSZip = require('jszip');
 const sharp = require('sharp');
 const curlyRegex = /\{([^\{\}]+)\}/g;
+const regexOptional = /\|optional\w*/g;
 const convert = require('xml-js');
 
 module.exports = class {
 
-    constructor(entry) {
+    constructor() {
     }
+
+    /** Init
+     * @async
+     * @param {requestInput} entry - The entry object containing information about the file processing.
+     * @returns {Promise<void | Error>} A promise that resolves when the document has been built successfully or rejects with an error.
+     */
+    init = async (entry) => {
+        try {
+            return await this.buildDocument(entry);
+        } catch (error) {
+            console.error(error);
+            if (error instanceof Error) return error; // Return the error if it's an instance of Error
+            return new Error('An unknown error occurred'); // Return a generic Error if the caught error is not an Error instance
+        }
+    };
     /** Builds a DOCX document by processing an input file, manipulating its contents, and generating a new output file.
      * @async
      * @param {requestInput} entry - The entry object containing information about the file processing.
@@ -85,10 +101,9 @@ module.exports = class {
             const outputZip = await zip.generateAsync({ type: 'nodebuffer' });
             fs.writeFileSync(outputPath, outputZip);
         } catch (error) {
-            console.error('Error processing the DOCX file:', error);
+            throwError(error.status || 500, error.message || null)
         }
     };
-
     //Inner Function
     /** Build Elements of Docs Processes an array of document elements to build new rows for tables.
      * 
@@ -269,20 +284,96 @@ module.exports = class {
         tableHead.elements = [...tableHead.elements, ...rows];
         return tableHead;
     };
+    getCellWidth = (tableCell) => {
+        tableCell.elements
+            .filter(el => el.name === 'w:tcPr')
+            .map(e => {
+                e.elements.map(ee => {
+                    console.log("ee", ee)
+                })
+            })
 
-    //2. replace Cells
-    replaceCellContent = (tableCell) => {
-        const cellSettings = this.getCellSettings(tableCell)
-        if (cellSettings?.replacer?.placeholder !== undefined) this.changeText({ tableCell, cellSettings })
-        //console.log("cellSettings", cellSettings)
-        if (cellSettings?.replacer?.bckClr !== undefined) this.changeSHD({ tableCell, cellSettings })
-        if (cellSettings?.imagePlaceholder === true) {
-            const imageID = cellSettings.loop + 1
-            const drawingObject = this.buildDrawingObject({ imageID })
-            Object.assign(tableCell, drawingObject);
-        }
-        return cellSettings.remove === true ? false : true //false will remove row
+        // const tcPr = tableCell.elements.find(el => el.name === 'w:tcPr');
+        // if (tcPr) {
+
+        //     console.log("tcPr", tcPr)
+        //     const tcW = tcPr.elements.find(el => el.name === 'w:tcW');
+        //     if (tcW && tcW.attributes && tcW.attributes['w:w']) {
+        //         return parseInt(tcW.attributes['w:w']); // Width in twips (1/20th of a point)
+        //     }
+        // }
+        // return null; // Default if no width is found
     }
+    //2. replace Cells
+    /**Replaces or modifies the content of a table cell based on cell settings.
+     * @param {TableCell} tableCell - The cell element to process.
+     * @returns {boolean} - Returns `true` to keep the cell, or `false` to remove it.
+     */
+    replaceCellContent = (tableCell) => {
+        const cellSettings = this.getCellSettings(tableCell);
+        if (cellSettings?.replacer?.placeholder !== undefined) this.changeText({ tableCell, cellSettings });
+        if (cellSettings?.replacer?.bckClr !== undefined) this.changeSHD({ tableCell, cellSettings });
+        if (cellSettings?.imagePlaceholder === true) {
+            const imageID = (cellSettings.loop ?? 0) + 2; // Image ID based on loop index
+            tableCell = this.addImage(tableCell, imageID)
+        }
+        return cellSettings.remove === true ? false : true;
+    };
+    /** Adds an image to a specified table cell.
+     * This function constructs a drawing object for the image using the provided image ID,
+     * assigns it to the table cell, and optionally sets the image title if it exists.
+     * @param {Object} tableCell - The table cell to which the image will be added.
+     * @param {Array<Object>} tableCell.elements - An array of elements in the table cell.
+     * @param {string} imageID - The unique identifier for the image to be added.
+     * @returns {Object} The updated table cell with the image and title added.
+     */
+    addImage = (tableCell, imageID) => {
+        // const cellWidth = this.getCellWidth(tableCell)
+        // console.log("cellWidth", cellWidth)
+        const rID = `rId${this.highestRId + imageID}`;
+        const cellWidth = "1754930"; // Width in EMU (English Metric Units)
+        const cellHeight = "1315450"; // Height in EMU
+        const drawingObject = buildDrawingObject({ imageID, rID, cellWidth, cellHeight });
+        const tableElements = [tableCell.elements[0]];
+        tableElements.push(drawingObject);
+        if (tableCell.elements[2]) { // Image Title
+            this.setImageTitle(tableCell.elements[2]);
+            tableElements.push(tableCell.elements[2]);
+        }
+        tableCell.elements = tableElements;
+        return tableCell;
+    };
+    /** Sets the title of an image in the specified table element.
+     * This function searches through the elements of the table element to find
+     * text elements (`w:t`) within run elements (`w:r`), and sets their text
+     * to 'This is the Image Title'.
+     * @param {CellType} tableElement - The cell object containing paragraphs and runs.
+     * @returns {void} This function does not return a value.
+     */
+    setImageTitle = (tableElement) => {
+        if (!tableElement.elements) return
+        tableElement.elements
+            .filter(f => f.name === 'w:r')
+            .map(e => {
+                if (!e.elements) return
+                e.elements
+                    .filter(f => f.name === 'w:t')
+                    .map(textElement => {
+                        if (!textElement.elements) return
+                        textElement.elements[0].text = 'This is the Image Title';
+                    });
+            });
+    };
+    /** Replaces specific elements in a given array of elements.
+     * This function processes each element in the input array, checking if
+     * the element is a table (`w:tbl`). If it is, it filters out rows
+     * (`w:tr`) based on the success of replacing the content in their cells
+     * (`w:tc`). If the content replacement in any cell returns false,
+     * that row will be excluded from the final result.
+     * @async
+     * @param {Array<DocumentElement>} elements - An array of document elements to process. Each element can represent tables, rows, cells, or other document structures.
+     * @returns {Promise<Array<DocumentElement>>} A promise that resolves to an array of modified document elements, including new rows based on the specified logic.
+     */
     replaceElements = (elements) => {
         return new Promise((resolve) => {
             for (const element of elements) {
@@ -355,465 +446,86 @@ module.exports = class {
             })
         return cellSettings
     }
-
     //2. Cell Changer Functions
+    /** Changes the shading (background color) of a specified table cell.
+     * This function modifies the shading of a table cell based on the provided
+     * settings. If a background color is specified in the cell settings,
+     * it updates the `w:fill` attribute of the shading element (`w:shd`) 
+     * in the cell's properties (`w:tcPr`).
+     * @param {Object} entry - The entry object containing the cell and settings for modification.
+     * @param {CellType} entry.tableCell - The table cell whose shading is to be changed.
+     * @param {CellSettingsType} entry.cellSettings - The settings that contain the background color.
+     * @returns {void} This function does not return a value.
+     */
     changeSHD = (entry) => {
         const { tableCell, cellSettings } = entry
         const fill = cellSettings?.replacer?.bckClr
-        if (!fill) return
+        if (!fill || !tableCell.elements) return
         tableCell.elements
             .filter(f => f.name === 'w:tcPr')
             .some(w_tcPr => {
+                if (!w_tcPr.elements) return
                 w_tcPr.elements
                     .filter(f => f.name === 'w:shd')
                     .some(shade => {
+                        if (!shade.attributes) return
                         shade.attributes['w:fill'] = fill
                     })
             })
     }
+    /** Changes the text color of the runs in paragraphs within a specified cell.
+     * This function iterates through the paragraphs (`w:p`) in the cell,
+     * and for each run (`w:r`) inside those paragraphs, it checks for the 
+     * run properties (`w:rPr`). If `w:rPr` does not exist, it creates one.
+     * It then sets the text color by adding a `w:color` element with a 
+     * specified color value.
+     *
+     * @param {CellType} cell - The cell object containing paragraphs and runs.
+     * @returns {void} This function does not return a value.
+     */
     changeTextColor = (cell) => {
-        console.log(':::', cell.elements);
-
+        if (!cell.elements) return
         cell.elements
             .filter(f => f.name === 'w:p') // Filter paragraphs in the cell
             .some(w_p => {
+                if (!w_p.elements) return
                 w_p.elements
                     .filter(f => f.name === 'w:r') // Filter runs inside the paragraph
-                    .some(w_r => {
-                        // Look for w:rPr inside w:r
+                    .some(w_r => {// Look for w:rPr inside w:r
+                        if (!w_r.elements) return
                         let rPr = w_r.elements.find(f => f.name === 'w:rPr');
-
                         if (!rPr) {
-                            // If w:rPr doesn't exist, create it
                             rPr = { name: 'w:rPr', elements: [] };
                             w_r.elements.unshift(rPr); // Add w:rPr to the beginning of w:r elements
                         }
-
-                        // Ensure that rPr.elements is defined
-                        if (!rPr.elements) {
-                            rPr.elements = []; // Initialize it if not present
-                        }
-
-                        // Now push w:color inside w:rPr
+                        if (!rPr.elements) rPr.elements = []; // Initialize it if not present
                         rPr.elements.push({ name: 'w:color', attributes: { 'w:val': '75b6d6' } });
                     });
             });
     }
-    buildDrawingObject = (entry) => {
-        const { imageID } = entry
-        const rID = `rId${this.highestRId + imageID}`
-
-        return {
-            "type": "element",
-            "name": "w:tc",
-            "elements": [
-                {
-                    "type": "element",
-                    "name": "w:tcPr",
-                    "elements": [
-                        {
-                            "type": "element",
-                            "name": "w:shd",
-                            "attributes": {
-                                "w:fill": "auto",
-                                "w:val": "clear"
-                            }
-                        },
-                        {
-                            "type": "element",
-                            "name": "w:tcMar",
-                            "elements": [
-                                {
-                                    "type": "element",
-                                    "name": "w:top",
-                                    "attributes": {
-                                        "w:w": "100.0",
-                                        "w:type": "dxa"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:left",
-                                    "attributes": {
-                                        "w:w": "100.0",
-                                        "w:type": "dxa"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:bottom",
-                                    "attributes": {
-                                        "w:w": "100.0",
-                                        "w:type": "dxa"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:right",
-                                    "attributes": {
-                                        "w:w": "100.0",
-                                        "w:type": "dxa"
-                                    }
-                                }
-                            ]
-                        },
-                        {
-                            "type": "element",
-                            "name": "w:vAlign",
-                            "attributes": {
-                                "w:val": "top"
-                            }
-                        }
-                    ]
-                },
-                {
-                    "type": "element",
-                    "name": "w:p",
-                    "attributes": {
-                        "w:rsidR": "00000000",
-                        "w:rsidDel": "00000000",
-                        "w:rsidP": "00000000",
-                        "w:rsidRDefault": "00000000",
-                        "w:rsidRPr": "00000000",
-                        "w14:paraId": "00000002"
-                    },
-                    "elements": [
-                        {
-                            "type": "element",
-                            "name": "w:pPr",
-                            "elements": [
-                                {
-                                    "type": "element",
-                                    "name": "w:keepNext",
-                                    "attributes": {
-                                        "w:val": "0"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:keepLines",
-                                    "attributes": {
-                                        "w:val": "0"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:widowControl",
-                                    "attributes": {
-                                        "w:val": "0"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:pBdr",
-                                    "elements": [
-                                        {
-                                            "type": "element",
-                                            "name": "w:top",
-                                            "attributes": {
-                                                "w:space": "0",
-                                                "w:sz": "0",
-                                                "w:val": "nil"
-                                            }
-                                        },
-                                        {
-                                            "type": "element",
-                                            "name": "w:left",
-                                            "attributes": {
-                                                "w:space": "0",
-                                                "w:sz": "0",
-                                                "w:val": "nil"
-                                            }
-                                        },
-                                        {
-                                            "type": "element",
-                                            "name": "w:bottom",
-                                            "attributes": {
-                                                "w:space": "0",
-                                                "w:sz": "0",
-                                                "w:val": "nil"
-                                            }
-                                        },
-                                        {
-                                            "type": "element",
-                                            "name": "w:right",
-                                            "attributes": {
-                                                "w:space": "0",
-                                                "w:sz": "0",
-                                                "w:val": "nil"
-                                            }
-                                        },
-                                        {
-                                            "type": "element",
-                                            "name": "w:between",
-                                            "attributes": {
-                                                "w:space": "0",
-                                                "w:sz": "0",
-                                                "w:val": "nil"
-                                            }
-                                        }
-                                    ]
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:shd",
-                                    "attributes": {
-                                        "w:fill": "auto",
-                                        "w:val": "clear"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:spacing",
-                                    "attributes": {
-                                        "w:after": "0",
-                                        "w:before": "0",
-                                        "w:line": "240",
-                                        "w:lineRule": "auto"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:ind",
-                                    "attributes": {
-                                        "w:left": "0",
-                                        "w:right": "0",
-                                        "w:firstLine": "0"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:jc",
-                                    "attributes": {
-                                        "w:val": "left"
-                                    }
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:rPr"
-                                }
-                            ]
-                        },
-                        {
-                            "type": "element",
-                            "name": "w:r",
-                            "attributes": {
-                                "w:rsidDel": "00000000",
-                                "w:rsidR": "00000000",
-                                "w:rsidRPr": "00000000"
-                            },
-                            "elements": [
-                                {
-                                    "type": "element",
-                                    "name": "w:rPr"
-                                },
-                                {
-                                    "type": "element",
-                                    "name": "w:drawing",
-                                    "elements": [
-                                        {
-                                            "type": "element",
-                                            "name": "wp:inline",
-                                            "attributes": {
-                                                "distB": "114300",
-                                                "distT": "114300",
-                                                "distL": "114300",
-                                                "distR": "114300"
-                                            },
-                                            "elements": [
-                                                {
-                                                    "type": "element",
-                                                    "name": "wp:extent",
-                                                    "attributes": {
-                                                        "cx": "1754930",
-                                                        "cy": "1315450"
-                                                    }
-                                                },
-                                                {
-                                                    "type": "element",
-                                                    "name": "wp:effectExtent",
-                                                    "attributes": {
-                                                        "b": "0",
-                                                        "l": "0",
-                                                        "r": "0",
-                                                        "t": "0"
-                                                    }
-                                                },
-                                                {
-                                                    "type": "element",
-                                                    "name": "wp:docPr",
-                                                    "attributes": {
-                                                        "id": `${imageID}`,
-                                                        "name": `image${imageID}.png`
-                                                    }
-                                                },
-                                                {
-                                                    "type": "element",
-                                                    "name": "a:graphic",
-                                                    "elements": [
-                                                        {
-                                                            "type": "element",
-                                                            "name": "a:graphicData",
-                                                            "attributes": {
-                                                                "uri": "http://schemas.openxmlformats.org/drawingml/2006/picture"
-                                                            },
-                                                            "elements": [
-                                                                {
-                                                                    "type": "element",
-                                                                    "name": "pic:pic",
-                                                                    "elements": [
-                                                                        {
-                                                                            "type": "element",
-                                                                            "name": "pic:nvPicPr",
-                                                                            "elements": [
-                                                                                {
-                                                                                    "type": "element",
-                                                                                    "name": "pic:cNvPr",
-                                                                                    "attributes": {
-                                                                                        "id": `${imageID}`,
-                                                                                        "name": `image${imageID}.png`
-                                                                                    }
-                                                                                },
-                                                                                {
-                                                                                    "type": "element",
-                                                                                    "name": "pic:cNvPicPr",
-                                                                                    "attributes": {
-                                                                                        "preferRelativeResize": "0"
-                                                                                    }
-                                                                                }
-                                                                            ]
-                                                                        },
-                                                                        {
-                                                                            "type": "element",
-                                                                            "name": "pic:blipFill",
-                                                                            "elements": [
-                                                                                {
-                                                                                    "type": "element",
-                                                                                    "name": "a:blip",
-                                                                                    "attributes": {
-                                                                                        "r:embed": `${rID}`
-                                                                                    }
-                                                                                },
-                                                                                {
-                                                                                    "type": "element",
-                                                                                    "name": "a:srcRect",
-                                                                                    "attributes": {
-                                                                                        "b": "0",
-                                                                                        "l": "0",
-                                                                                        "r": "0",
-                                                                                        "t": "0"
-                                                                                    }
-                                                                                },
-                                                                                {
-                                                                                    "type": "element",
-                                                                                    "name": "a:stretch",
-                                                                                    "elements": [
-                                                                                        {
-                                                                                            "type": "element",
-                                                                                            "name": "a:fillRect"
-                                                                                        }
-                                                                                    ]
-                                                                                }
-                                                                            ]
-                                                                        },
-                                                                        {
-                                                                            "type": "element",
-                                                                            "name": "pic:spPr",
-                                                                            "elements": [
-                                                                                {
-                                                                                    "type": "element",
-                                                                                    "name": "a:xfrm",
-                                                                                    "elements": [
-                                                                                        {
-                                                                                            "type": "element",
-                                                                                            "name": "a:off",
-                                                                                            "attributes": {
-                                                                                                "x": "0",
-                                                                                                "y": "0"
-                                                                                            }
-                                                                                        },
-                                                                                        {
-                                                                                            "type": "element",
-                                                                                            "name": "a:ext",
-                                                                                            "attributes": {
-                                                                                                "cx": "1754930",
-                                                                                                "cy": "1315450"
-                                                                                            }
-                                                                                        }
-                                                                                    ]
-                                                                                },
-                                                                                {
-                                                                                    "type": "element",
-                                                                                    "name": "a:prstGeom",
-                                                                                    "attributes": {
-                                                                                        "prst": "rect"
-                                                                                    }
-                                                                                },
-                                                                                {
-                                                                                    "type": "element",
-                                                                                    "name": "a:ln"
-                                                                                }
-                                                                            ]
-                                                                        }
-                                                                    ]
-                                                                }
-                                                            ]
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        }
-                                    ]
-                                }
-                            ]
-                        },
-                        {
-                            "type": "element",
-                            "name": "w:r",
-                            "attributes": {
-                                "w:rsidDel": "00000000",
-                                "w:rsidR": "00000000",
-                                "w:rsidRPr": "00000000"
-                            },
-                            "elements": [
-                                {
-                                    "type": "element",
-                                    "name": "w:rPr",
-                                    "elements": [
-                                        {
-                                            "type": "element",
-                                            "name": "w:rtl",
-                                            "attributes": {
-                                                "w:val": "0"
-                                            }
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-    }
+    /** Changes the text of a specified table cell.
+     * @param {Object} entry - The entry object containing the cell and settings for modification.
+     * @param {CellType} entry.tableCell - The table cell whose shading is to be changed.
+     * @param {CellSettingsType} entry.cellSettings - The settings that contain the background color.
+     * @returns {void} This function does not return a value.
+     */
     changeText = (entry) => {
-
-        const regexOptional = /\|optional\w*/g;
-
         const { tableCell, cellSettings } = entry
-        //      console.log(':::', tableCell.elements)
+        if (!tableCell.elements) return
         tableCell.elements
             .filter(f => f.name === 'w:p')
             .some(w_p => {
+                if (!w_p.elements) return
                 w_p.elements
                     .filter(f => f.name === 'w:r')
                     .some(w_r => {
+                        if (!w_r.elements) return
                         w_r.elements
                             .filter(f => f.name === 'w:t')//Text only
                             .some(table_inner => {
                                 const placeholder = cellSettings?.replacer?.placeholder
                                 if (!placeholder || placeholder === undefined) return
-                                let resultObject = {}
+                                /** @type {ResultObject} */ let resultObject = {};
                                 switch (true) {
                                     case cellSettings.loop === undefined://simple replace
                                         if (this.fileData[placeholder] === undefined) {
@@ -838,22 +550,36 @@ module.exports = class {
                                 }
                                 // console.log("resultObject",resultObject)
                                 if (resultObject === undefined) return
-                                if (resultObject._ !== undefined) table_inner.elements[0].text = resultObject._
+                                if (resultObject._ !== undefined && table_inner.elements) table_inner.elements[0].text = resultObject._
                                 if (resultObject.bckClr !== undefined) cellSettings.replacer.bckClr = resultObject.bckClr
                             })
                     })
             })
     }
-
     // Helper
+    /**Converts an XML string to a JSON string.
+     * @param {string} xml - The XML string to be converted.
+     * @returns {string|null} - The resulting JSON string, or null if an error occurs.
+     */
     parseXML(xml) {
-        const result = convert.xml2json(xml, { compact: false, spaces: 0 });
-        return result
+        try {
+            return convert.xml2json(xml, { compact: false, spaces: 0 });
+        } catch (error) {
+            console.error('Error parsing XML:', error);
+            return null;
+        }
     }
+    /** Converts a JSON object to an XML string.
+     * @param {Object} json - The JSON object to be converted.
+     * @returns {string|null} - The resulting XML string, or null if an error occurs.
+     */
     parseJSON(json) {
-        const options = { compact: false, ignoreComment: true, spaces: 0 };
-        const result = convert.json2xml(json, options);
-        return result
+        try {
+            return convert.json2xml(json, { compact: false, ignoreComment: true, spaces: 0 });
+        } catch (error) {
+            console.error('Error parsing JSON:', error);
+            return null;
+        }
     }
     JSONSIZE = (jsonObject) => {
         const jsonString = JSON.stringify(jsonObject);
@@ -862,10 +588,8 @@ module.exports = class {
         return `Size of JSON object: ${sizeInMB.toFixed(4)} MB`;
     }
     higRId = (highestRel) => {
-        //console.log(highestRel.attributes.Id)
         const highestRId = parseInt(highestRel.attributes.Id.replace('rId', ''), 10);
         this.highestRId = highestRId
         return highestRId
     }
-
 }

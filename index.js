@@ -8,7 +8,7 @@ const d = async () => {
 
 const csr = new app()
 
-    await csr.buildDocument({ inputPath, outputPath, data: {} })
+    await csr.init({ inputPath, outputPath, data: {} })
 }
 
 d()
